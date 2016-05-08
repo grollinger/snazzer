@@ -27,6 +27,9 @@ else
     SUDO="sudo"
 fi
 
+# An empty dummy file to replace exclusion files if necessary
+EMPTY_TMP=$(mktemp -t empty_dummy.XXXXXX)
+
 do_snazzer_sig() {
     if type snazzer_sig_func | grep -i function >/dev/null; then
         snazzer_sig_func
@@ -34,6 +37,34 @@ do_snazzer_sig() {
         default_snazzer_sig_func
     fi
 }
+
+get_measurements_exclude_file() {
+    DIR=$1
+    EXCL_FILE="$DIR/$SNAZZER_MEASUREMENTS_EXCLUDE_FILE"
+
+    if [ -f "$EXCL_FILE" ]; then
+        echo "$EXCL_FILE"
+    else
+        echo "$EMPTY_TMP"
+    fi
+}
+
+alloc_empty() {
+    if [ ! -f "$EMPTY_TMP" ]; then
+        touch "$EMPTY_TMP"
+    fi
+}
+
+remove_empty() {
+    if [ -f "$EMPTY_TMP" ]; then
+        rm "$EMPTY_TMP"
+    fi
+}
+
+escape_quote() {
+    echo "$1" | sed "s|'|'\\\\''|g"
+}
+
 
 get_date() {
     if [ "$SNAZZER_USE_UTC" = "1" ]; then
@@ -49,7 +80,10 @@ host_datetime() {
 }
 
 build_tar_cmd() {
-    DIR_ESC=$(echo "$1" | sed "s|'|'\\\\''|g")
+    DIR=$1
+    DIR_ESC=$(escape_quote "$DIR")
+    EXCL=$(get_measurements_exclude_file "$DIR")
+    EXCL_ESC=$(escape_quote "$EXCL")
 
     cat <<CMD
 find '$DIR_ESC' -xdev -not -path '$DIR_ESC' -printf '%P\0' | \
@@ -58,7 +92,7 @@ tar --no-recursion --one-file-system --preserve-permissions \
 --numeric-owner --null --create --to-stdout \
 --directory '$DIR_ESC' \
 --files-from - \
---exclude-from '$DIR_ESC/$SNAZZER_MEASUREMENTS_EXCLUDE_FILE'
+--exclude-from '$EXCL_ESC'
 CMD
 }
 
@@ -66,6 +100,7 @@ do_tar() {
     DIR=$1
     LIST_TMP=$(mktemp)
     SORT_TMP=$(mktemp)
+    EXCL_FILE=$(get_measurements_exclude_file "$DIR")
 
     chmod 0700 "$LIST_TMP"
     # Keep tar/find out of the pipe in case they have errors
@@ -75,7 +110,7 @@ do_tar() {
             --numeric-owner --null --create --to-stdout \
             --directory "$DIR" \
             --files-from "$SORT_TMP" \
-            --exclude-from "$DIR/$SNAZZER_MEASUREMENTS_EXCLUDE_FILE" && \
+            --exclude-from "$EXCL_FILE" && \
         rm "$SORT_TMP" && \
         rm "$LIST_TMP"
 }
@@ -91,18 +126,23 @@ CMD
 }
 
 build_du_cmd() {
-    DIR_ESC=$(echo "$1" | sed "s|'|'\\\\''|g")
+    DIR=$1
+    DIR_ESC=$(escape_quote "$DIR")
+    EXCL=$(get_measurements_exclude_file "$DIR")
+    EXCL_ESC=$(escape_quote "$EXCL")
+
     cat <<CMD
-(du -bs --one-file-system --exclude-from '$DIR_ESC/$SNAZZER_MEASUREMENTS_EXCLUDE_FILE' '$DIR_ESC')
+(du -bs --one-file-system --exclude-from '$EXCL_ESC' '$DIR_ESC')
 CMD
 }
 
 do_du() {
     DIR=$1
+    EXCL_FILE=$(get_measurements_exclude_file "$DIR")
     EXCL_TMP=$(mktemp)
     # du doesn't understand relative exclude rules, so make them absolute
     # could use sed but that means complicated escapes to deal with hostile $DIR
-    $SUDO cat "$DIR/$SNAZZER_MEASUREMENTS_EXCLUDE_FILE" | while read EXCL_RULE
+    $SUDO cat "$EXCL_FILE" | while read EXCL_RULE
     do
         echo "$DIR/$EXCL_RULE" >> "$EXCL_TMP"
     done
@@ -112,7 +152,7 @@ do_du() {
 
 build_find_excl_switch() {
     DIR=$1
-    EXCL_FILE="$DIR/$SNAZZER_MEASUREMENTS_EXCLUDE_FILE"
+    EXCL_FILE=$(get_measurements_exclude_file "$DIR")
 
     sed "s/'/'\\\\''/g" "$EXCL_FILE" | while read RULE
     do
@@ -211,6 +251,8 @@ measure() {
     MEAS_DIR=$1
     FAKE_DIR=$2
 
+    alloc_empty
+
     if [ -z "$FAKE_DIR" ]; then
         FAKE_DIR="$MEAS_DIR"
     fi
@@ -254,6 +296,8 @@ HERE
         do_tar "$MEAS_DIR" | measure_sha512sum "$FAKE_DIR"
     fi
     measure_tar_info
+
+    remove_empty
 }
 
 show_usage() {
